@@ -33,7 +33,14 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 
-from tools.audit_tools import get_all_runs  # noqa: E402
+# ============================================================================
+# DATABASE IMPORT
+# ============================================================================
+
+from tools.audit_tools import (  # noqa: E402
+    init_db,
+    get_all_runs,
+)
 
 
 # ============================================================================
@@ -46,6 +53,18 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+
+# ============================================================================
+# INITIALIZE DATABASE
+# IMPORTANT FOR STREAMLIT CLOUD
+# ============================================================================
+
+try:
+    init_db()
+except Exception as exc:
+    st.error(f"Unable to initialize audit database: {exc}")
+    st.stop()
 
 
 # ============================================================================
@@ -710,7 +729,6 @@ def style_outcome(value):
     )
 
 
-# pandas newer versions use .map()
 styled_df = df_display.style.map(
     style_outcome,
     subset=["Outcome"],
