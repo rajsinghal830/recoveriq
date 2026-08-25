@@ -10,11 +10,16 @@ Displays:
 - Full audit log
 - Sidebar filters
 - Optional auto-refresh
+
+For Streamlit Cloud:
+- Initializes SQLite automatically
+- Seeds demo data automatically when database is empty
 """
 
 import sys
 import os
 import time
+import json
 
 import streamlit as st
 import plotly.express as px
@@ -40,6 +45,8 @@ if PROJECT_ROOT not in sys.path:
 from tools.audit_tools import (  # noqa: E402
     init_db,
     get_all_runs,
+    log_run_start,
+    log_run_complete,
 )
 
 
@@ -56,15 +63,337 @@ st.set_page_config(
 
 
 # ============================================================================
-# INITIALIZE DATABASE
-# IMPORTANT FOR STREAMLIT CLOUD
+# DEMO DATA PATH
 # ============================================================================
 
-try:
-    init_db()
-except Exception as exc:
-    st.error(f"Unable to initialize audit database: {exc}")
+MOCK_DATA_PATH = os.path.join(
+    PROJECT_ROOT,
+    "data",
+    "mock_failures.json",
+)
+
+
+# ============================================================================
+# DATABASE INITIALIZATION
+# ============================================================================
+
+def initialize_database():
+    """
+    Initialize SQLite database and create all required tables.
+    """
+
+    try:
+        init_db()
+        return True
+
+    except Exception as exc:
+        st.error(
+            f"Unable to initialize audit database: {exc}"
+        )
+        return False
+
+
+# ============================================================================
+# LOAD MOCK DATA
+# ============================================================================
+
+def load_mock_events():
+    """
+    Load demo payment failure events from mock_failures.json.
+    """
+
+    if not os.path.exists(MOCK_DATA_PATH):
+        st.error(
+            "Demo data file not found: "
+            f"{MOCK_DATA_PATH}"
+        )
+        return []
+
+    try:
+
+        with open(
+            MOCK_DATA_PATH,
+            "r",
+            encoding="utf-8",
+        ) as file:
+
+            data = json.load(file)
+
+        # Support either:
+        # [ {...}, {...} ]
+        #
+        # or:
+        # { "events": [ {...}, {...} ] }
+
+        if isinstance(data, dict):
+
+            if "events" in data:
+                data = data["events"]
+
+            elif "payments" in data:
+                data = data["payments"]
+
+        if not isinstance(data, list):
+            st.error(
+                "mock_failures.json must contain a list of payment events."
+            )
+            return []
+
+        return data
+
+    except Exception as exc:
+
+        st.error(
+            f"Unable to load demo payment data: {exc}"
+        )
+
+        return []
+
+
+# ============================================================================
+# NORMALIZE DEMO AMOUNT
+# ============================================================================
+
+def normalize_demo_amount(events):
+    """
+    Detect whether amounts in mock data are stored as rupees
+    or paise.
+
+    Example:
+
+        1499       -> ₹1,499
+        149900     -> ₹1,499
+    """
+
+    if not events:
+        return events
+
+    amounts = []
+
+    for event in events:
+
+        value = event.get(
+            "amount",
+            0,
+        )
+
+        try:
+            amounts.append(
+                float(value)
+            )
+
+        except (TypeError, ValueError):
+            pass
+
+    if not amounts:
+        return events
+
+    # If values look like paise, convert to rupees.
+    #
+    # Example:
+    # 149900 -> 1499
+    #
+    # If values are already like:
+    # 1499, 9999, 299
+    # they remain unchanged.
+
+    looks_like_paise = (
+        max(amounts) >= 10000
+    )
+
+    normalized_events = []
+
+    for event in events:
+
+        new_event = dict(event)
+
+        try:
+
+            amount = float(
+                new_event.get(
+                    "amount",
+                    0,
+                )
+            )
+
+            if looks_like_paise:
+                amount = amount / 100.0
+
+            new_event["amount"] = amount
+
+        except (TypeError, ValueError):
+
+            new_event["amount"] = 0.0
+
+        normalized_events.append(
+            new_event
+        )
+
+    return normalized_events
+
+
+# ============================================================================
+# SEED DEMO DATABASE
+# ============================================================================
+
+def seed_demo_data():
+    """
+    Populate the database with demo recovery records.
+
+    This is especially important for Streamlit Cloud because
+    Streamlit Cloud does not have the recovery database that
+    exists on the developer's local machine.
+
+    Demo behavior:
+
+        BANK_TIMEOUT
+            -> RECOVERED
+
+        NETWORK_ERROR
+            -> RECOVERED
+
+        Everything else
+            -> PENDING
+    """
+
+    try:
+
+        existing_runs = get_all_runs()
+
+    except Exception as exc:
+
+        st.error(
+            f"Unable to read audit database: {exc}"
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # Database already contains data.
+    # Do not create duplicate records.
+    # --------------------------------------------------------
+
+    if existing_runs:
+        return
+
+    # --------------------------------------------------------
+    # Load demo events
+    # --------------------------------------------------------
+
+    events = load_mock_events()
+
+    if not events:
+        return
+
+    events = normalize_demo_amount(
+        events
+    )
+
+    # --------------------------------------------------------
+    # Create recovery records
+    # --------------------------------------------------------
+
+    created_count = 0
+
+    for event in events:
+
+        payment_id = str(
+            event.get(
+                "id",
+                event.get(
+                    "payment_id",
+                    f"demo_{created_count + 1:03d}",
+                ),
+            )
+        )
+
+        customer_name = event.get(
+            "customer_name",
+            event.get(
+                "customer",
+                "Demo Customer",
+            ),
+        )
+
+        try:
+
+            amount = float(
+                event.get(
+                    "amount",
+                    0,
+                )
+            )
+
+        except (TypeError, ValueError):
+
+            amount = 0.0
+
+        failure_reason = str(
+            event.get(
+                "failure_reason",
+                "NETWORK_ERROR",
+            )
+        ).upper().strip()
+
+        # ----------------------------------------------------
+        # Create recovery run
+        # ----------------------------------------------------
+
+        try:
+
+            run_id = log_run_start(
+                payment_id=payment_id,
+                customer_name=customer_name,
+                amount=amount,
+                failure_reason=failure_reason,
+            )
+
+        except Exception:
+            continue
+
+        # ----------------------------------------------------
+        # Demo recovery logic
+        # ----------------------------------------------------
+
+        if failure_reason in {
+            "BANK_TIMEOUT",
+            "NETWORK_ERROR",
+        }:
+
+            outcome = "RECOVERED"
+            recovered_amount = amount
+
+        else:
+
+            outcome = "PENDING"
+            recovered_amount = 0.0
+
+        # ----------------------------------------------------
+        # Complete recovery run
+        # ----------------------------------------------------
+
+        try:
+
+            log_run_complete(
+                run_id=run_id,
+                outcome=outcome,
+                amount_recovered=recovered_amount,
+            )
+
+            created_count += 1
+
+        except Exception:
+            continue
+
+
+# ============================================================================
+# INITIALIZE DATABASE + DEMO DATA
+# ============================================================================
+
+if not initialize_database():
     st.stop()
+
+seed_demo_data()
 
 
 # ============================================================================
@@ -72,10 +401,15 @@ except Exception as exc:
 # ============================================================================
 
 try:
+
     raw_runs = get_all_runs()
 
 except Exception as exc:
-    st.error(f"Unable to load audit data: {exc}")
+
+    st.error(
+        f"Unable to load audit data: {exc}"
+    )
+
     st.stop()
 
 
@@ -86,6 +420,7 @@ except Exception as exc:
 if not raw_runs:
 
     with st.sidebar:
+
         st.markdown("## 💰 RecoverIQ")
         st.caption("v1.0.0")
 
@@ -96,9 +431,13 @@ if not raw_runs:
         "real-time audit & analytics"
     )
 
+    st.warning(
+        "⚠️ No recovery data is available."
+    )
+
     st.info(
-        "🚀 No recovery runs yet.\n\n"
-        "Run `python orchestrator.py` first."
+        "Make sure data/mock_failures.json exists "
+        "in the GitHub repository."
     )
 
     st.stop()
@@ -108,7 +447,9 @@ if not raw_runs:
 # CREATE DATAFRAME
 # ============================================================================
 
-df_all = pd.DataFrame(raw_runs)
+df_all = pd.DataFrame(
+    raw_runs
+)
 
 
 # ============================================================================
@@ -116,11 +457,17 @@ df_all = pd.DataFrame(raw_runs)
 # ============================================================================
 
 EXPECTED_COLUMNS = {
+
     "payment_id": "N/A",
+
     "customer_name": "Unknown",
+
     "amount": 0.0,
+
     "failure_reason": "unknown",
+
     "outcome": "PENDING",
+
     "amount_recovered": 0.0,
 }
 
@@ -128,6 +475,7 @@ EXPECTED_COLUMNS = {
 for column, default_value in EXPECTED_COLUMNS.items():
 
     if column not in df_all.columns:
+
         df_all[column] = default_value
 
 
@@ -163,6 +511,18 @@ df_all["failure_reason"] = (
 )
 
 
+df_all["payment_id"] = (
+    df_all["payment_id"]
+    .astype(str)
+)
+
+
+df_all["customer_name"] = (
+    df_all["customer_name"]
+    .astype(str)
+)
+
+
 # ============================================================================
 # SIDEBAR
 # ============================================================================
@@ -170,18 +530,25 @@ df_all["failure_reason"] = (
 with st.sidebar:
 
     st.markdown("## 💰 RecoverIQ")
-    st.caption("v1.0.0")
+
+    st.caption(
+        "v1.0.0"
+    )
 
     st.divider()
 
-    st.subheader("🔍 Filters")
+    st.subheader(
+        "🔍 Filters"
+    )
 
     # ------------------------------------------------------------------------
     # Failure reason filter
     # ------------------------------------------------------------------------
 
     all_reasons = sorted(
-        df_all["failure_reason"]
+        df_all[
+            "failure_reason"
+        ]
         .dropna()
         .unique()
         .tolist()
@@ -199,7 +566,9 @@ with st.sidebar:
     # ------------------------------------------------------------------------
 
     all_outcomes = sorted(
-        df_all["outcome"]
+        df_all[
+            "outcome"
+        ]
         .dropna()
         .unique()
         .tolist()
@@ -234,14 +603,18 @@ df = df_all.copy()
 if selected_reasons:
 
     df = df[
-        df["failure_reason"].isin(selected_reasons)
+        df[
+            "failure_reason"
+        ].isin(selected_reasons)
     ]
 
 
 if selected_outcomes:
 
     df = df[
-        df["outcome"].isin(selected_outcomes)
+        df[
+            "outcome"
+        ].isin(selected_outcomes)
     ]
 
 
@@ -249,7 +622,9 @@ if selected_outcomes:
 # HEADER
 # ============================================================================
 
-st.title("💰 RecoverIQ Dashboard")
+st.title(
+    "💰 RecoverIQ Dashboard"
+)
 
 st.caption(
     "AI-powered payment recovery intelligence — "
@@ -261,9 +636,9 @@ st.caption(
 # FINAL OUTCOME FUNCTION
 # ============================================================================
 
-def get_final_outcome(group: pd.DataFrame) -> str:
+def get_final_outcome(group):
     """
-    Determine the final status of a payment.
+    Determine final payment status.
 
     Priority:
 
@@ -274,18 +649,26 @@ def get_final_outcome(group: pd.DataFrame) -> str:
     """
 
     outcomes = set(
-        group["outcome"]
+        group[
+            "outcome"
+        ]
         .astype(str)
         .str.upper()
     )
 
     if "RECOVERED" in outcomes:
+
         return "RECOVERED"
 
     if "ESCALATED" in outcomes:
+
         return "ESCALATED"
 
-    if "FAILED" in outcomes and "PENDING" not in outcomes:
+    if (
+        "FAILED" in outcomes
+        and "PENDING" not in outcomes
+    ):
+
         return "FAILED"
 
     return "PENDING"
@@ -326,10 +709,11 @@ payment_df = (
 # ============================================================================
 
 final_outcomes = (
-    df.groupby("payment_id")
+    df.groupby(
+        "payment_id"
+    )
     .apply(
-        get_final_outcome,
-        include_groups=False,
+        get_final_outcome
     )
     .reset_index(
         name="outcome"
@@ -348,15 +732,21 @@ payment_df = payment_df.merge(
 # KPI CALCULATIONS
 # ============================================================================
 
-total_payments = payment_df[
-    "payment_id"
-].nunique()
+total_payments = (
+    payment_df[
+        "payment_id"
+    ].nunique()
+)
 
 
-recovered_payment_ids = payment_df.loc[
-    payment_df["outcome"] == "RECOVERED",
-    "payment_id",
-].unique()
+recovered_payment_ids = (
+    payment_df.loc[
+        payment_df[
+            "outcome"
+        ] == "RECOVERED",
+        "payment_id",
+    ].unique()
+)
 
 
 total_recovered = len(
@@ -365,10 +755,13 @@ total_recovered = len(
 
 
 recovery_rate = (
+
     total_recovered
     / total_payments
     * 100
+
     if total_payments > 0
+
     else 0.0
 )
 
@@ -379,11 +772,15 @@ recovery_rate = (
 
 recovered_amounts = (
     payment_df[
-        payment_df["payment_id"].isin(
+        payment_df[
+            "payment_id"
+        ].isin(
             recovered_payment_ids
         )
     ]
-    .groupby("payment_id")[
+    .groupby(
+        "payment_id"
+    )[
         "amount_recovered"
     ]
     .max()
@@ -451,10 +848,14 @@ chart_col1, chart_col2 = st.columns(2)
 
 with chart_col1:
 
-    st.subheader("🥧 Recovery Outcome Breakdown")
+    st.subheader(
+        "🥧 Recovery Outcome Breakdown"
+    )
 
     outcome_counts = (
-        payment_df["outcome"]
+        payment_df[
+            "outcome"
+        ]
         .value_counts()
         .reset_index()
     )
@@ -465,10 +866,18 @@ with chart_col1:
     ]
 
     OUTCOME_COLORS = {
-        "RECOVERED": "#22c55e",
-        "FAILED": "#ef4444",
-        "PENDING": "#f59e0b",
-        "ESCALATED": "#8b5cf6",
+
+        "RECOVERED":
+            "#22c55e",
+
+        "FAILED":
+            "#ef4444",
+
+        "PENDING":
+            "#f59e0b",
+
+        "ESCALATED":
+            "#8b5cf6",
     }
 
     fig_pie = px.pie(
@@ -502,7 +911,7 @@ with chart_col1:
 
     st.plotly_chart(
         fig_pie,
-        width="stretch",
+        use_container_width=True,
     )
 
 
@@ -512,11 +921,15 @@ with chart_col1:
 
 with chart_col2:
 
-    st.subheader("📊 Recovery Rate by Failure Reason")
+    st.subheader(
+        "📊 Recovery Rate by Failure Reason"
+    )
 
     reason_df = (
         payment_df
-        .groupby("failure_reason")
+        .groupby(
+            "failure_reason"
+        )
         .agg(
             total=(
                 "payment_id",
@@ -532,9 +945,18 @@ with chart_col2:
         .reset_index()
     )
 
-    reason_df["recovery_rate_pct"] = (
-        reason_df["recovered"]
-        / reason_df["total"]
+    reason_df[
+        "recovery_rate_pct"
+    ] = (
+
+        reason_df[
+            "recovered"
+        ]
+
+        / reason_df[
+            "total"
+        ]
+
         * 100
     ).round(1)
 
@@ -548,17 +970,29 @@ with chart_col2:
             "#f59e0b",
             "#22c55e",
         ],
-        range_color=[0, 100],
+        range_color=[
+            0,
+            100,
+        ],
         text="recovery_rate_pct",
         labels={
-            "failure_reason": "Failure Reason",
-            "recovery_rate_pct": "Recovery Rate (%)",
+            "failure_reason":
+                "Failure Reason",
+
+            "recovery_rate_pct":
+                "Recovery Rate (%)",
         },
     )
 
     fig_bar.update_traces(
         texttemplate="%{text:.1f}%",
         textposition="outside",
+    )
+
+    max_rate = float(
+        reason_df[
+            "recovery_rate_pct"
+        ].max()
     )
 
     fig_bar.update_layout(
@@ -574,18 +1008,14 @@ with chart_col2:
             0,
             max(
                 100,
-                float(
-                    reason_df[
-                        "recovery_rate_pct"
-                    ].max()
-                ) + 10,
+                max_rate + 10,
             ),
         ],
     )
 
     st.plotly_chart(
         fig_bar,
-        width="stretch",
+        use_container_width=True,
     )
 
 
@@ -596,7 +1026,9 @@ st.divider()
 # RECOVERY BY FAILURE TYPE
 # ============================================================================
 
-st.subheader("📋 Recovery by Failure Type")
+st.subheader(
+    "📋 Recovery by Failure Type"
+)
 
 
 summary_table = reason_df[
@@ -623,13 +1055,15 @@ summary_table = (
         "Recovery Rate (%)",
         ascending=False,
     )
-    .reset_index(drop=True)
+    .reset_index(
+        drop=True
+    )
 )
 
 
 st.dataframe(
     summary_table,
-    width="stretch",
+    use_container_width=True,
     hide_index=True,
 )
 
@@ -641,15 +1075,23 @@ st.divider()
 # FULL AUDIT LOG
 # ============================================================================
 
-st.subheader("🗂️ Full Audit Log")
+st.subheader(
+    "🗂️ Full Audit Log"
+)
 
 
 DISPLAY_COLUMNS = [
+
     "payment_id",
+
     "customer_name",
+
     "amount",
+
     "failure_reason",
+
     "outcome",
+
     "amount_recovered",
 ]
 
@@ -665,12 +1107,24 @@ df_display = df[
 
 df_display = df_display.rename(
     columns={
-        "payment_id": "Payment ID",
-        "customer_name": "Customer",
-        "amount": "Amount (₹)",
-        "failure_reason": "Failure Reason",
-        "outcome": "Outcome",
-        "amount_recovered": "Recovered (₹)",
+
+        "payment_id":
+            "Payment ID",
+
+        "customer_name":
+            "Customer",
+
+        "amount":
+            "Amount (₹)",
+
+        "failure_reason":
+            "Failure Reason",
+
+        "outcome":
+            "Outcome",
+
+        "amount_recovered":
+            "Recovered (₹)",
     }
 )
 
@@ -679,8 +1133,12 @@ df_display = df_display.rename(
 # CURRENCY FORMAT
 # ============================================================================
 
-df_display["Amount (₹)"] = (
-    df_display["Amount (₹)"]
+df_display[
+    "Amount (₹)"
+] = (
+    df_display[
+        "Amount (₹)"
+    ]
     .apply(
         lambda value:
         f"₹{value:,.2f}"
@@ -688,8 +1146,12 @@ df_display["Amount (₹)"] = (
 )
 
 
-df_display["Recovered (₹)"] = (
-    df_display["Recovered (₹)"]
+df_display[
+    "Recovered (₹)"
+] = (
+    df_display[
+        "Recovered (₹)"
+    ]
     .apply(
         lambda value:
         f"₹{value:,.2f}"
@@ -731,13 +1193,15 @@ def style_outcome(value):
 
 styled_df = df_display.style.map(
     style_outcome,
-    subset=["Outcome"],
+    subset=[
+        "Outcome"
+    ],
 )
 
 
 st.dataframe(
     styled_df,
-    width="stretch",
+    use_container_width=True,
     hide_index=True,
 )
 
