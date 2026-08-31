@@ -2,25 +2,30 @@
 
 RecoverIQ is an AI-powered payment recovery system designed to help businesses recover revenue from failed payments.
 
-It analyzes payment failures, identifies the root cause, selects an appropriate recovery strategy, executes recovery actions, and records every decision in an audit database.
+It analyzes payment failures, evaluates recovery eligibility and priority, selects a recovery strategy, executes recovery actions, and records every decision in an auditable SQLite database.
+
+## 🌐 Live Demo
+
+🚀 **Live Dashboard:** https://recoveriq-69wqrcau3gsog2ndr8sbdk.streamlit.app/
+
+💻 **GitHub Repository:** https://github.com/rajsinghal830/recoveriq
+
+> The live deployment uses demo data and mock recovery tools for a safe Buildathon demonstration.
 
 ---
 
 ## 🎯 Problem
 
-Failed payments create lost revenue and require manual follow-up.
+Failed payments create lost revenue and require manual follow-up. Different payment failures need different recovery strategies.
 
-Different payment failures need different recovery strategies.
-
-For example:
-
-- Insufficient funds → retry later
-- Expired card → ask the customer to update the card
-- Bank timeout → retry using another payment method
+- Insufficient funds → retry later and remind the customer
+- Expired card → ask the customer to update payment details
+- Bank timeout → retry through an appropriate payment route
 - Mandate failure → resend authorization
 - Checkout abandonment → re-engage the customer
+- Network error → retry when appropriate
 
-RecoverIQ automates this process.
+RecoverIQ automates this workflow while keeping recovery decisions explainable and auditable.
 
 ---
 
@@ -28,36 +33,25 @@ RecoverIQ automates this process.
 
 ```text
 Payment Failure
-      │
-      ▼
-┌─────────────────────┐
-│ Root Cause Detector │
-└─────────┬───────────┘
-          │
-          ▼
-┌─────────────────────┐
-│ Recovery Strategist │
-└─────────┬───────────┘
-          │
-          ▼
-┌─────────────────────┐
-│ Recovery Executor   │
-└─────────┬───────────┘
-          │
-          ▼
-┌─────────────────────┐
-│ SQLite Audit Trail  │
-└─────────┬───────────┘
-          │
-          ▼
-┌─────────────────────┐
-│ Streamlit Dashboard │
-└─────────────────────┘
+      ↓
+Root Cause Detector
+      ↓
+Policy Engine
+      ↓
+Recovery Strategist
+      ↓
+Recovery Executor
+      ↓
+SQLite Audit Trail
+      ↓
+Streamlit Dashboard
 ```
+
+**Core flow:** Failed Payment → Detection → Policy Evaluation → Strategy → Execution → Audit → Analytics
 
 ---
 
-## 🤖 AI Agents
+## 🤖 Multi-Agent Architecture
 
 ### Agent 1 — Root Cause Detector
 
@@ -72,23 +66,30 @@ Supported failure categories:
 - `CHECKOUT_ABANDONED`
 - `NETWORK_ERROR`
 
-The detector uses Gemini when AI reasoning is required and has a rule-based fallback for common failures.
+The detector can use Gemini when AI reasoning is required and includes a rule-based fallback for common failures.
+
+### Policy Engine — Safety Layer
+
+The policy engine provides deterministic and explainable guardrails before recovery execution.
+
+It evaluates:
+
+- Failure type
+- Payment value
+- Estimated recoverability
+- Recovery priority
+- Whether automated recovery is allowed
+- Appropriate policy action
+
+Example policy actions include `STANDARD_RECOVERY` and `PRIORITY_RECOVERY`.
 
 ### Agent 2 — Recovery Strategist
 
-Selects the best recovery strategy based on:
-
-- Failure reason
-- Severity
-- Recovery window
-- Payment information
-- Retry history
+Selects the best recovery strategy using the failure reason, severity, recovery opportunity, payment information, retry history, and policy constraints.
 
 ### Agent 3 — Recovery Executor
 
-Executes the selected recovery action.
-
-The project supports mock execution for safe demonstrations.
+Executes the selected recovery action through the available tools. Mock execution is supported for safe demonstrations.
 
 ---
 
@@ -96,12 +97,12 @@ The project supports mock execution for safe demonstrations.
 
 | Failure Type | Recovery Strategy |
 |---|---|
-| INSUFFICIENT_FUNDS | Retry on salary credit day + WhatsApp reminder |
-| CARD_EXPIRED | Ask customer to update card |
-| BANK_TIMEOUT | Retry through UPI / alternate route |
-| MANDATE_FAILED | Resend eMandate authorization |
-| CHECKOUT_ABANDONED | WhatsApp + voice re-engagement |
-| NETWORK_ERROR | Immediate retry |
+| `INSUFFICIENT_FUNDS` | Retry later + customer reminder |
+| `CARD_EXPIRED` | Ask customer to update payment details |
+| `BANK_TIMEOUT` | Retry through an appropriate payment route |
+| `MANDATE_FAILED` | Resend eMandate authorization |
+| `CHECKOUT_ABANDONED` | Customer re-engagement |
+| `NETWORK_ERROR` | Immediate/controlled retry |
 
 ---
 
@@ -112,8 +113,8 @@ The project supports mock execution for safe demonstrations.
 | Language | Python |
 | AI | Google Gemini |
 | Agent Framework | LangChain |
-| Payment API | Razorpay |
-| Communication | Twilio |
+| Payment Integration | Razorpay tools / mock payment layer |
+| Communication | Twilio tools / mock communication layer |
 | Dashboard | Streamlit |
 | Charts | Plotly |
 | Database | SQLite |
@@ -130,7 +131,8 @@ recoveriq/
 │   ├── __init__.py
 │   ├── detector.py
 │   ├── strategist.py
-│   └── executor.py
+│   ├── executor.py
+│   └── policy.py
 │
 ├── dashboard/
 │   ├── __init__.py
@@ -148,6 +150,7 @@ recoveriq/
 ├── config.py
 ├── orchestrator.py
 ├── webhook_simulator.py
+├── recoveriq_audit.db
 ├── requirements.txt
 ├── README.md
 └── .gitignore
@@ -157,26 +160,29 @@ recoveriq/
 
 ## ⚙️ Installation
 
-Clone the repository:
+### 1. Clone the repository
 
 ```bash
 git clone https://github.com/rajsinghal830/recoveriq.git
-```
-
-Move into the project:
-
-```bash
 cd recoveriq
 ```
 
-Create a virtual environment on Windows:
+### 2. Create a virtual environment
+
+Windows PowerShell:
 
 ```powershell
 python -m venv venv
 venv\Scripts\activate
 ```
 
-Install dependencies:
+If your virtual environment is one directory above `recoveriq`:
+
+```powershell
+..\venv\Scripts\Activate.ps1
+```
+
+### 3. Install dependencies
 
 ```bash
 pip install -r requirements.txt
@@ -186,9 +192,7 @@ pip install -r requirements.txt
 
 ## 🔐 Environment Variables
 
-Create a `.env` file locally.
-
-Example:
+Create a local `.env` file:
 
 ```env
 GEMINI_API_KEY=your_gemini_key
@@ -201,27 +205,45 @@ TWILIO_AUTH_TOKEN=your_twilio_auth_token
 TWILIO_PHONE=your_twilio_phone
 ```
 
-**Never commit real API keys or secrets to GitHub.**
+**Never commit real API keys, tokens, or secrets to GitHub.**
 
-The application reads credentials using environment variables.
+Use environment variables locally and deployment secrets for Streamlit Cloud.
 
 ---
 
-## ▶️ Run RecoverIQ
+## ▶️ Run the Recovery Engine
 
-Run the recovery engine:
+From the `recoveriq` directory:
 
 ```bash
 python orchestrator.py
 ```
 
-The system processes payment failure events and produces a recovery summary.
+### Test with 3 events
+
+```bash
+python orchestrator.py --count 3
+```
+
+### Filter by failure type
+
+```bash
+python orchestrator.py --failure-type CARD_EXPIRED
+```
+
+### Reset the audit database and run a fresh demo
+
+```bash
+python orchestrator.py --reset
+```
+
+`--reset` clears previous audit data so the demonstration starts from a clean state.
 
 ---
 
 ## 📊 Run the Dashboard
 
-Start Streamlit:
+From the `recoveriq` directory:
 
 ```bash
 python -m streamlit run dashboard/app.py
@@ -233,21 +255,11 @@ Open:
 http://localhost:8501
 ```
 
----
-
-## ☁️ Streamlit Deployment
-
-RecoverIQ can be deployed using Streamlit Cloud.
-
-The dashboard automatically initializes the SQLite database and loads demo payment data when the deployed database is empty.
-
-Secrets should be configured through Streamlit Cloud rather than committed to GitHub.
+The dashboard reads from the SQLite audit database and displays the latest recovery results.
 
 ---
 
 ## 📈 Dashboard Features
-
-The dashboard provides:
 
 - 💳 Total unique payments
 - ✅ Total recovered payments
@@ -255,11 +267,15 @@ The dashboard provides:
 - 💰 Amount recovered
 - 🥧 Recovery outcome breakdown
 - 📊 Recovery rate by failure reason
+- 🎯 Recovery priority distribution
 - 📋 Recovery by failure type
 - 🗂️ Full audit log
 - 🔍 Failure reason filters
 - 🔍 Outcome filters
+- 🔍 Priority filters
 - 🔄 Optional auto-refresh
+
+The audit log exposes fields including Payment ID, Customer, Amount, Failure Reason, Priority Score, Priority, Policy Action, Policy Allowed, Outcome, and Recovered Amount.
 
 ---
 
@@ -271,9 +287,7 @@ The project includes:
 data/mock_failures.json
 ```
 
-This provides sample failed payment events for demonstrating the complete recovery workflow.
-
-The dashboard can automatically seed demo data when the audit database is empty.
+The dataset contains simulated payment failure events covering multiple failure categories, allowing the complete workflow to be demonstrated without depending on production payment traffic.
 
 ---
 
@@ -285,6 +299,7 @@ The audit system tracks:
 
 - Recovery runs
 - Agent decisions
+- Policy decisions
 - Recovery actions
 - Recovery outcomes
 - Recovered amounts
@@ -294,145 +309,40 @@ This provides traceability for every recovery decision.
 
 ---
 
-## 🔒 Safety
+## 🔒 Safety & Guardrails
 
-The project supports mock modes for external services so the Buildathon demonstration can run without sending real customer communications or performing unwanted live actions.
+RecoverIQ is designed for safe demonstration and controlled automation.
 
-API credentials should always be stored as environment variables or deployment secrets.
+- Policy guardrails evaluate whether automated recovery is allowed.
+- Payment and communication tools support mock execution.
+- The demo does not need to charge real customers or send unwanted messages.
+- API credentials must be stored in environment variables or deployment secrets.
 
 ---
 
 ## 🎥 Buildathon Demo Flow
 
 ```text
-1. Payment failure occurs
-          ↓
-2. RecoverIQ receives the failure event
-          ↓
-3. Detector Agent identifies the root cause
-          ↓
-4. Strategist Agent selects a recovery strategy
-          ↓
-5. Executor Agent performs the recovery action
-          ↓
-6. Action is recorded in the audit database
-          ↓
-7. Recovery result is recorded
-          ↓
-8. Streamlit dashboard displays analytics
+Payment failure occurs
+        ↓
+Detector identifies root cause
+        ↓
+Policy Engine evaluates eligibility + priority
+        ↓
+Strategist selects recovery strategy
+        ↓
+Executor performs recovery action
+        ↓
+Decision + action are recorded
+        ↓
+Dashboard displays recovery analytics
 ```
 
 ---
 
-## 🌐 Live Demo
+## 📊 Example Demo Metrics
 
-### RecoverIQ Dashboard
-
-https://recoveriq-69wqrcau3gsog2ndr8sbdk.streamlit.app/
-
-### GitHub Repository
-
-https://github.com/rajsinghal830/recoveriq
-
----
-
-## 💰 Example Recovery Scenarios
-
-### Insufficient Funds
-
-```text
-Payment Failed
-      ↓
-INSUFFICIENT_FUNDS
-      ↓
-Medium Severity
-      ↓
-Schedule retry
-      ↓
-WhatsApp reminder
-      ↓
-Payment recovered
-```
-
-### Card Expired
-
-```text
-Payment Failed
-      ↓
-CARD_EXPIRED
-      ↓
-Ask customer to update card
-      ↓
-Provide payment link
-      ↓
-Retry payment
-```
-
-### Bank Timeout
-
-```text
-Payment Failed
-      ↓
-BANK_TIMEOUT
-      ↓
-Immediate retry
-      ↓
-Use alternate payment route
-      ↓
-Payment recovered
-```
-
-### Checkout Abandoned
-
-```text
-Checkout Started
-      ↓
-Customer leaves
-      ↓
-CHECKOUT_ABANDONED
-      ↓
-WhatsApp re-engagement
-      ↓
-Voice follow-up when appropriate
-      ↓
-Retry payment
-```
-
----
-
-## 🧠 Why AI?
-
-Traditional payment retry systems often apply the same retry strategy to every failure.
-
-RecoverIQ uses intelligent decision-making to select a strategy based on the reason for failure.
-
-Instead of:
-
-```text
-Payment Failed → Retry Everything
-```
-
-RecoverIQ uses:
-
-```text
-Payment Failed
-      ↓
-Understand Why
-      ↓
-Choose Best Strategy
-      ↓
-Execute Action
-      ↓
-Measure Recovery
-```
-
-This makes the recovery process more targeted and reduces unnecessary retries and customer contact.
-
----
-
-## 📊 Example Dashboard Metrics
-
-A demo run can show metrics such as:
+A demo run can produce metrics such as:
 
 | Metric | Example |
 |---|---:|
@@ -441,58 +351,54 @@ A demo run can show metrics such as:
 | Recovery Rate | 30.0% |
 | Amount Recovered | ₹76,470.00 |
 
-These values are generated from the included demo data and may change depending on the recovery run.
+These values are based on a demo run and can change when the recovery simulation is executed again.
 
 ---
 
-## 🔄 Recovery Pipeline
+## 🧠 Why AI?
+
+Traditional payment retry systems often apply the same recovery action to every failed payment.
+
+RecoverIQ instead follows a decision-based workflow:
 
 ```text
-                    ┌──────────────────┐
-                    │ Payment Failure  │
-                    └────────┬─────────┘
-                             │
-                             ▼
-                  ┌─────────────────────┐
-                  │  Detector Agent     │
-                  │                     │
-                  │ Root Cause Analysis │
-                  └──────────┬──────────┘
-                             │
-                             ▼
-                  ┌─────────────────────┐
-                  │ Strategist Agent    │
-                  │                     │
-                  │ Recovery Strategy   │
-                  └──────────┬──────────┘
-                             │
-                             ▼
-                  ┌─────────────────────┐
-                  │ Executor Agent      │
-                  │                     │
-                  │ Execute Recovery    │
-                  └──────────┬──────────┘
-                             │
-                             ▼
-                  ┌─────────────────────┐
-                  │ Audit Database      │
-                  │                     │
-                  │ Decisions + Actions │
-                  └──────────┬──────────┘
-                             │
-                             ▼
-                  ┌─────────────────────┐
-                  │ Streamlit Dashboard │
-                  │                     │
-                  │ Analytics + KPIs    │
-                  └─────────────────────┘
+Payment Failed
+      ↓
+Understand Why
+      ↓
+Evaluate Recovery Opportunity
+      ↓
+Apply Policy Guardrails
+      ↓
+Choose Best Strategy
+      ↓
+Execute Action
+      ↓
+Audit + Measure Recovery
 ```
+
+This makes recovery more targeted, explainable, and easier to monitor.
+
+---
+
+## ☁️ Deployment
+
+The dashboard is deployed on Streamlit Cloud.
+
+**Live Dashboard:**  
+https://recoveriq-69wqrcau3gsog2ndr8sbdk.streamlit.app/
+
+Deployment entry point:
+
+```text
+dashboard/app.py
+```
+
+For deployment, select the GitHub repository, set `dashboard/app.py` as the main file, and configure required secrets in the deployment settings.
 
 ---
 
 ## 🚀 Future Improvements
-
-Possible future improvements include:
 
 - Real-time Razorpay webhook integration
 - More payment failure categories
@@ -503,23 +409,18 @@ Possible future improvements include:
 - Advanced notification personalization
 - Production-grade persistent database
 - Recovery revenue forecasting
+- Real-time recovery monitoring
 
 ---
 
 ## 👨‍💻 Project
 
-Built for the **Razorpay Buildathon**.
+Built for the **Razorpay AI Builder / Buildathon**.
 
-RecoverIQ focuses on turning failed payments into recoverable revenue through intelligent, automated recovery workflows.
+RecoverIQ focuses on turning failed payments into recoverable revenue through intelligent, automated, policy-controlled recovery workflows.
 
----
+## 🔗 Links
 
-## 📌 Repository
+🚀 **Live Dashboard:** https://recoveriq-69wqrcau3gsog2ndr8sbdk.streamlit.app/
 
-GitHub:
-
-https://github.com/rajsinghal830/recoveriq
-
-Live Dashboard:
-
-https://recoveriq-69wqrcau3gsog2ndr8sbdk.streamlit.app/
+💻 **GitHub Repository:** https://github.com/rajsinghal830/recoveriq
