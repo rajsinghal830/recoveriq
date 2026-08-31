@@ -1,16 +1,29 @@
 """
 tools/audit_tools.py
+
 SQLite-based audit trail for RecoverIQ.
-Every agent decision and action is persisted here.
+
+Stores:
+- Recovery runs
+- Agent decisions
+- Actions taken
+- Priority scores
+- Policy decisions
+
+The database is designed to survive repeated application runs.
 """
 
+import logging
 import sqlite3
 import uuid
-import logging
 from datetime import datetime
-from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# DATABASE PATH
+# ============================================================================
 
 try:
     from config import AUDIT_DB_PATH
@@ -18,90 +31,138 @@ except ImportError:
     AUDIT_DB_PATH = "recoveriq_audit.db"
 
 
-# ---------------------------------------------------------------------------
-# Database path
-# ---------------------------------------------------------------------------
-
-DB_PATH = Path(AUDIT_DB_PATH)
-
-# Create parent directory if one is specified
-if DB_PATH.parent != Path("."):
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-
-
-# ---------------------------------------------------------------------------
-# Connection
-# ---------------------------------------------------------------------------
+# ============================================================================
+# CONNECTION
+# ============================================================================
 
 def _conn():
-    """Create a SQLite database connection."""
-    con = sqlite3.connect(str(DB_PATH))
-    return con
+    """
+    Create a SQLite connection.
+
+    check_same_thread=False helps when Streamlit and other
+    components access the database during the same application.
+    """
+
+    return sqlite3.connect(
+        AUDIT_DB_PATH,
+        check_same_thread=False,
+    )
 
 
-# ---------------------------------------------------------------------------
-# Initialize database
-# ---------------------------------------------------------------------------
+# ============================================================================
+# INITIALIZE DATABASE
+# ============================================================================
 
 def init_db():
-    """Create all audit tables if they do not already exist."""
+    """
+    Create all RecoverIQ audit tables if they don't exist.
+
+    Also upgrades an older database by adding the new
+    priority/policy columns when necessary.
+    """
 
     with _conn() as con:
 
         con.executescript(
             """
             CREATE TABLE IF NOT EXISTS recovery_runs (
-                id TEXT PRIMARY KEY,
-                payment_id TEXT,
-                customer_name TEXT,
-                amount REAL,
-                failure_reason TEXT,
-                started_at TEXT,
-                completed_at TEXT,
-                outcome TEXT DEFAULT 'PENDING',
-                amount_recovered REAL DEFAULT 0.0
+                id                  TEXT PRIMARY KEY,
+                payment_id          TEXT,
+                customer_name       TEXT,
+                amount              REAL,
+                failure_reason      TEXT,
+                started_at          TEXT,
+                completed_at        TEXT,
+                outcome             TEXT DEFAULT 'PENDING',
+                amount_recovered    REAL DEFAULT 0.0,
+
+                priority_score      REAL DEFAULT 0.0,
+                priority            TEXT DEFAULT 'LOW',
+                policy_allowed      INTEGER DEFAULT 1,
+                policy_action       TEXT DEFAULT '',
+                policy_reason       TEXT DEFAULT ''
             );
 
             CREATE TABLE IF NOT EXISTS agent_decisions (
-                id TEXT PRIMARY KEY,
-                run_id TEXT,
-                agent_name TEXT,
-                input_summary TEXT,
-                decision TEXT,
-                reasoning TEXT,
-                timestamp TEXT
+                id              TEXT PRIMARY KEY,
+                run_id          TEXT,
+                agent_name      TEXT,
+                input_summary   TEXT,
+                decision        TEXT,
+                reasoning       TEXT,
+                timestamp       TEXT
             );
 
             CREATE TABLE IF NOT EXISTS actions_taken (
-                id TEXT PRIMARY KEY,
-                run_id TEXT,
-                action_type TEXT,
-                details TEXT,
-                result TEXT,
-                timestamp TEXT
+                id              TEXT PRIMARY KEY,
+                run_id          TEXT,
+                action_type     TEXT,
+                details         TEXT,
+                result          TEXT,
+                timestamp       TEXT
             );
             """
         )
 
-        con.commit()
+        # --------------------------------------------------------------------
+        # Upgrade existing databases
+        # --------------------------------------------------------------------
 
-    logger.info("Audit DB initialized at %s", DB_PATH)
+        existing_columns = {
+            row[1]
+            for row in con.execute(
+                "PRAGMA table_info(recovery_runs)"
+            ).fetchall()
+        }
+
+        new_columns = {
+            "priority_score": (
+                "REAL DEFAULT 0.0"
+            ),
+            "priority": (
+                "TEXT DEFAULT 'LOW'"
+            ),
+            "policy_allowed": (
+                "INTEGER DEFAULT 1"
+            ),
+            "policy_action": (
+                "TEXT DEFAULT ''"
+            ),
+            "policy_reason": (
+                "TEXT DEFAULT ''"
+            ),
+        }
+
+        for column, definition in new_columns.items():
+
+            if column not in existing_columns:
+
+                con.execute(
+                    f"""
+                    ALTER TABLE recovery_runs
+                    ADD COLUMN {column} {definition}
+                    """
+                )
+
+    logger.info(
+        "Audit database initialized at %s",
+        AUDIT_DB_PATH,
+    )
 
 
-# ---------------------------------------------------------------------------
-# Recovery run
-# ---------------------------------------------------------------------------
+# ============================================================================
+# LOG RUN START
+# ============================================================================
 
 def log_run_start(
     payment_id,
     customer_name,
     amount,
-    failure_reason
+    failure_reason,
 ):
-    """Insert a new recovery run and return its run ID."""
-
-    # Make sure tables exist
-    init_db()
+    """
+    Create a new recovery run and return its run ID.
+    """
 
     run_id = str(uuid.uuid4())
 
@@ -116,11 +177,9 @@ def log_run_start(
                 customer_name,
                 amount,
                 failure_reason,
-                started_at,
-                outcome,
-                amount_recovered
+                started_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
                 run_id,
@@ -129,30 +188,66 @@ def log_run_start(
                 amount,
                 failure_reason,
                 datetime.now().isoformat(),
-                "PENDING",
-                0.0,
             ),
         )
-
-        con.commit()
 
     return run_id
 
 
-# ---------------------------------------------------------------------------
-# Agent decisions
-# ---------------------------------------------------------------------------
+# ============================================================================
+# LOG PRIORITY + POLICY
+# ============================================================================
+
+def log_policy_decision(
+    run_id,
+    priority_score,
+    priority,
+    policy_allowed,
+    policy_action,
+    policy_reason,
+):
+    """
+    Store the policy engine's decision for a recovery run.
+    """
+
+    with _conn() as con:
+
+        con.execute(
+            """
+            UPDATE recovery_runs
+            SET
+                priority_score=?,
+                priority=?,
+                policy_allowed=?,
+                policy_action=?,
+                policy_reason=?
+            WHERE id=?
+            """,
+            (
+                float(priority_score),
+                str(priority),
+                1 if policy_allowed else 0,
+                str(policy_action),
+                str(policy_reason),
+                run_id,
+            ),
+        )
+
+
+# ============================================================================
+# LOG AGENT DECISION
+# ============================================================================
 
 def log_decision(
     run_id,
     agent_name,
     input_summary,
     decision,
-    reasoning
+    reasoning,
 ):
-    """Log an agent decision."""
-
-    init_db()
+    """
+    Log an individual agent decision.
+    """
 
     with _conn() as con:
 
@@ -181,22 +276,20 @@ def log_decision(
             ),
         )
 
-        con.commit()
 
-
-# ---------------------------------------------------------------------------
-# Actions
-# ---------------------------------------------------------------------------
+# ============================================================================
+# LOG ACTION
+# ============================================================================
 
 def log_action(
     run_id,
     action_type,
     details,
-    result
+    result,
 ):
-    """Log an executed action."""
-
-    init_db()
+    """
+    Log an executed recovery action.
+    """
 
     with _conn() as con:
 
@@ -223,21 +316,19 @@ def log_action(
             ),
         )
 
-        con.commit()
 
-
-# ---------------------------------------------------------------------------
-# Complete recovery run
-# ---------------------------------------------------------------------------
+# ============================================================================
+# COMPLETE RUN
+# ============================================================================
 
 def log_run_complete(
     run_id,
     outcome,
-    amount_recovered=0.0
+    amount_recovered=0.0,
 ):
-    """Mark a recovery run as complete."""
-
-    init_db()
+    """
+    Mark a recovery run as complete.
+    """
 
     with _conn() as con:
 
@@ -245,30 +336,28 @@ def log_run_complete(
             """
             UPDATE recovery_runs
             SET
-                outcome = ?,
-                amount_recovered = ?,
-                completed_at = ?
-            WHERE id = ?
+                outcome=?,
+                amount_recovered=?,
+                completed_at=?
+            WHERE id=?
             """,
             (
-                outcome,
-                amount_recovered,
+                str(outcome),
+                float(amount_recovered or 0.0),
                 datetime.now().isoformat(),
                 run_id,
             ),
         )
 
-        con.commit()
 
-
-# ---------------------------------------------------------------------------
-# Get all runs
-# ---------------------------------------------------------------------------
+# ============================================================================
+# GET ALL RUNS
+# ============================================================================
 
 def get_all_runs():
-    """Return all recovery runs as a list of dictionaries."""
-
-    init_db()
+    """
+    Return all recovery runs as dictionaries.
+    """
 
     with _conn() as con:
 
@@ -282,15 +371,20 @@ def get_all_runs():
             """
         ).fetchall()
 
-    return [dict(row) for row in rows]
+    return [
+        dict(row)
+        for row in rows
+    ]
 
 
-# ---------------------------------------------------------------------------
-# Summary statistics
-# ---------------------------------------------------------------------------
+# ============================================================================
+# GET SUMMARY
+# ============================================================================
 
 def get_summary_stats():
-    """Return high-level recovery statistics."""
+    """
+    Return high-level recovery statistics.
+    """
 
     runs = get_all_runs()
 
@@ -308,11 +402,19 @@ def get_summary_stats():
     recovered = sum(
         1
         for run in runs
-        if run.get("outcome") == "RECOVERED"
+        if str(
+            run.get("outcome", "")
+        ).upper() == "RECOVERED"
     )
 
     amount = sum(
-        float(run.get("amount_recovered") or 0)
+        float(
+            run.get(
+                "amount_recovered",
+                0,
+            )
+            or 0
+        )
         for run in runs
     )
 
@@ -321,23 +423,10 @@ def get_summary_stats():
         "total_recovered": recovered,
         "recovery_rate": round(
             recovered / total * 100,
-            1
+            1,
         ),
         "total_amount_recovered": round(
             amount,
-            2
+            2,
         ),
     }
-
-
-# ---------------------------------------------------------------------------
-# Automatically initialize database
-# ---------------------------------------------------------------------------
-
-try:
-    init_db()
-except Exception as exc:
-    logger.error(
-        "Failed to initialize audit database: %s",
-        exc
-    )

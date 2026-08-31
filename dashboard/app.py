@@ -47,7 +47,10 @@ from tools.audit_tools import (  # noqa: E402
     get_all_runs,
     log_run_start,
     log_run_complete,
+    log_policy_decision,
 )
+
+from agents.policy import evaluate_policy  # noqa: E402
 
 
 # ============================================================================
@@ -189,14 +192,6 @@ def normalize_demo_amount(events):
         return events
 
     # If values look like paise, convert to rupees.
-    #
-    # Example:
-    # 149900 -> 1499
-    #
-    # If values are already like:
-    # 1499, 9999, 299
-    # they remain unchanged.
-
     looks_like_paise = (
         max(amounts) >= 10000
     )
@@ -268,31 +263,19 @@ def seed_demo_data():
 
         return
 
-    # --------------------------------------------------------
     # Database already contains data.
-    # Do not create duplicate records.
-    # --------------------------------------------------------
-
     if existing_runs:
         return
 
-    # --------------------------------------------------------
     # Load demo events
-    # --------------------------------------------------------
-
     events = load_mock_events()
 
     if not events:
         return
 
-    events = normalize_demo_amount(
-        events
-    )
+    events = normalize_demo_amount(events)
 
-    # --------------------------------------------------------
     # Create recovery records
-    # --------------------------------------------------------
-
     created_count = 0
 
     for event in events:
@@ -335,10 +318,7 @@ def seed_demo_data():
             )
         ).upper().strip()
 
-        # ----------------------------------------------------
         # Create recovery run
-        # ----------------------------------------------------
-
         try:
 
             run_id = log_run_start(
@@ -351,10 +331,33 @@ def seed_demo_data():
         except Exception:
             continue
 
-        # ----------------------------------------------------
-        # Demo recovery logic
-        # ----------------------------------------------------
+        # Run deterministic policy engine
+        try:
 
+            diagnosis = {
+                "failure_category": failure_reason,
+                "recommended_strategy": "",
+                "recoverability": 0.0,
+            }
+
+            policy = evaluate_policy(
+                event,
+                diagnosis,
+            )
+
+            log_policy_decision(
+                run_id,
+                policy.priority_score,
+                policy.priority,
+                policy.allowed,
+                policy.action,
+                policy.reason,
+            )
+
+        except Exception:
+            policy = None
+
+        # Demo recovery outcome
         if failure_reason in {
             "BANK_TIMEOUT",
             "NETWORK_ERROR",
@@ -368,10 +371,7 @@ def seed_demo_data():
             outcome = "PENDING"
             recovered_amount = 0.0
 
-        # ----------------------------------------------------
         # Complete recovery run
-        # ----------------------------------------------------
-
         try:
 
             log_run_complete(
@@ -469,6 +469,16 @@ EXPECTED_COLUMNS = {
     "outcome": "PENDING",
 
     "amount_recovered": 0.0,
+
+    "priority_score": 0.0,
+
+    "priority": "LOW",
+
+    "policy_allowed": 1,
+
+    "policy_action": "",
+
+    "policy_reason": "",
 }
 
 
@@ -523,6 +533,38 @@ df_all["customer_name"] = (
 )
 
 
+df_all["priority_score"] = pd.to_numeric(
+    df_all["priority_score"],
+    errors="coerce",
+).fillna(0.0)
+
+
+df_all["priority"] = (
+    df_all["priority"]
+    .astype(str)
+    .str.upper()
+    .str.strip()
+)
+
+
+df_all["policy_allowed"] = (
+    pd.to_numeric(
+        df_all["policy_allowed"],
+        errors="coerce",
+    )
+    .fillna(1)
+    .astype(int)
+)
+
+
+df_all["policy_action"] = (
+    df_all["policy_action"]
+    .astype(str)
+    .str.upper()
+    .str.strip()
+)
+
+
 # ============================================================================
 # SIDEBAR
 # ============================================================================
@@ -541,10 +583,7 @@ with st.sidebar:
         "🔍 Filters"
     )
 
-    # ------------------------------------------------------------------------
     # Failure reason filter
-    # ------------------------------------------------------------------------
-
     all_reasons = sorted(
         df_all[
             "failure_reason"
@@ -561,10 +600,7 @@ with st.sidebar:
         key="failure_reason_filter",
     )
 
-    # ------------------------------------------------------------------------
     # Outcome filter
-    # ------------------------------------------------------------------------
-
     all_outcomes = sorted(
         df_all[
             "outcome"
@@ -581,12 +617,23 @@ with st.sidebar:
         key="outcome_filter",
     )
 
+    # Priority filter
+    all_priorities = ["HIGH", "MEDIUM", "LOW"]
+
+    selected_priorities = st.multiselect(
+        "Filter by Priority",
+        options=[
+            priority
+            for priority in all_priorities
+            if priority in df_all["priority"].unique()
+        ],
+        default=[],
+        key="priority_filter",
+    )
+
     st.divider()
 
-    # ------------------------------------------------------------------------
     # Auto refresh
-    # ------------------------------------------------------------------------
-
     auto_refresh = st.checkbox(
         "🔄 Auto-refresh (5 s)",
         value=False,
@@ -615,6 +662,15 @@ if selected_outcomes:
         df[
             "outcome"
         ].isin(selected_outcomes)
+    ]
+
+
+if selected_priorities:
+
+    df = df[
+        df[
+            "priority"
+        ].isin(selected_priorities)
     ]
 
 
@@ -657,18 +713,15 @@ def get_final_outcome(group):
     )
 
     if "RECOVERED" in outcomes:
-
         return "RECOVERED"
 
     if "ESCALATED" in outcomes:
-
         return "ESCALATED"
 
     if (
         "FAILED" in outcomes
         and "PENDING" not in outcomes
     ):
-
         return "FAILED"
 
     return "PENDING"
@@ -699,6 +752,26 @@ payment_df = (
         amount_recovered=(
             "amount_recovered",
             "max",
+        ),
+        priority_score=(
+            "priority_score",
+            "max",
+        ),
+        priority=(
+            "priority",
+            "first",
+        ),
+        policy_allowed=(
+            "policy_allowed",
+            "max",
+        ),
+        policy_action=(
+            "policy_action",
+            "first",
+        ),
+        policy_reason=(
+            "policy_reason",
+            "first",
         ),
     )
 )
@@ -911,7 +984,7 @@ with chart_col1:
 
     st.plotly_chart(
         fig_pie,
-        use_container_width=True,
+        width="stretch",
     )
 
 
@@ -1015,8 +1088,66 @@ with chart_col2:
 
     st.plotly_chart(
         fig_bar,
-        use_container_width=True,
+        width="stretch",
     )
+
+
+# ============================================================================
+# PRIORITY DISTRIBUTION
+# ============================================================================
+
+st.subheader(
+    "🎯 Recovery Priority Distribution"
+)
+
+priority_counts = (
+    payment_df["priority"]
+    .value_counts()
+    .reindex(
+        ["HIGH", "MEDIUM", "LOW"]
+    )
+    .dropna()
+    .reset_index()
+)
+
+priority_counts.columns = [
+    "priority",
+    "count",
+]
+
+priority_fig = px.bar(
+    priority_counts,
+    x="priority",
+    y="count",
+    color="priority",
+    text="count",
+    color_discrete_map={
+        "HIGH": "#ef4444",
+        "MEDIUM": "#f59e0b",
+        "LOW": "#22c55e",
+    },
+)
+
+priority_fig.update_traces(
+    textposition="outside",
+)
+
+priority_fig.update_layout(
+    margin=dict(
+        t=20,
+        b=20,
+        l=20,
+        r=20,
+    ),
+    showlegend=False,
+    xaxis_title="Priority",
+    yaxis_title="Payments",
+)
+
+st.plotly_chart(
+    priority_fig,
+    width="stretch",
+)
 
 
 st.divider()
@@ -1063,7 +1194,7 @@ summary_table = (
 
 st.dataframe(
     summary_table,
-    use_container_width=True,
+    width="stretch",
     hide_index=True,
 )
 
@@ -1089,6 +1220,14 @@ DISPLAY_COLUMNS = [
     "amount",
 
     "failure_reason",
+
+    "priority_score",
+
+    "priority",
+
+    "policy_action",
+
+    "policy_allowed",
 
     "outcome",
 
@@ -1120,12 +1259,48 @@ df_display = df_display.rename(
         "failure_reason":
             "Failure Reason",
 
+        "priority_score":
+            "Priority Score",
+
+        "priority":
+            "Priority",
+
+        "policy_action":
+            "Policy Action",
+
+        "policy_allowed":
+            "Policy Allowed",
+
         "outcome":
             "Outcome",
 
         "amount_recovered":
             "Recovered (₹)",
     }
+)
+
+
+# ============================================================================
+# POLICY DISPLAY FORMAT
+# ============================================================================
+
+df_display["Priority Score"] = (
+    pd.to_numeric(
+        df_display["Priority Score"],
+        errors="coerce",
+    )
+    .fillna(0.0)
+    .round(1)
+)
+
+
+df_display["Policy Allowed"] = (
+    df_display["Policy Allowed"]
+    .map({
+        1: "YES",
+        0: "NO",
+    })
+    .fillna("YES")
 )
 
 
@@ -1191,17 +1366,46 @@ def style_outcome(value):
     )
 
 
+PRIORITY_BG = {
+
+    "HIGH":
+        "background-color: #fee2e2; "
+        "color: #991b1b;",
+
+    "MEDIUM":
+        "background-color: #fef3c7; "
+        "color: #92400e;",
+
+    "LOW":
+        "background-color: #d1fae5; "
+        "color: #065f46;",
+}
+
+
+def style_priority(value):
+
+    return PRIORITY_BG.get(
+        str(value).upper(),
+        "",
+    )
+
+
 styled_df = df_display.style.map(
     style_outcome,
     subset=[
         "Outcome"
+    ],
+).map(
+    style_priority,
+    subset=[
+        "Priority"
     ],
 )
 
 
 st.dataframe(
     styled_df,
-    use_container_width=True,
+    width="stretch",
     hide_index=True,
 )
 
